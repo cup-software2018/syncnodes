@@ -1,0 +1,8 @@
+nodes:
+  - name: node1
+    host: 192.168.1.11
+    user: johndoe
+  - name: node2
+    host: 192.168.1.12
+    user: johndoe
+  # List all your cluster nodes here
