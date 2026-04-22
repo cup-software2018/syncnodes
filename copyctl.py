@@ -54,7 +54,7 @@ async def main():
     parser = argparse.ArgumentParser(
         description="syncnodes File Copy Tool (copyctl)")
 
-    parser.add_argument("-i", "--inventory", default="inventory.yaml",
+    parser.add_argument("-i", "--inventory", default="nodes.yml",
                         help="Path to the inventory YAML file")
     parser.add_argument("-s", "--src", required=True,
                         help="Local source file path")

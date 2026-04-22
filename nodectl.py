@@ -72,7 +72,7 @@ async def main():
     # Setup argparse for CLI options
     parser = argparse.ArgumentParser(
         description="Multi-node Linux CLI Manager")
-    parser.add_argument("-i", "--inventory", default="inventory.yaml",
+    parser.add_argument("-i", "--inventory", default="nodes.yml",
                         help="Path to the inventory YAML file")
     parser.add_argument("-c", "--command", required=True,
                         help="Linux command to execute")
