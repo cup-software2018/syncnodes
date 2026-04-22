@@ -4,22 +4,7 @@ import yaml
 import asyncio
 import asyncssh
 import argparse
-
-# 1. Function to load the inventory from a YAML file
-
-
-def load_inventory(file_path: str) -> list:
-    try:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            data = yaml.safe_load(f)
-            return data.get('nodes', [])
-    except FileNotFoundError:
-        print(
-            f"[Error] Inventory file not found: {file_path}", file=sys.stderr)
-        sys.exit(1)
-    except yaml.YAMLError as e:
-        print(f"[Error] YAML parsing error: {e}", file=sys.stderr)
-        sys.exit(1)
+from utils import load_inventory
 
 # 2. Async function for FILE COPY (SFTP)
 
