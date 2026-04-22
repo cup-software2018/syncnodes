@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 import os
 import sys
 import yaml
@@ -13,7 +15,7 @@ async def copy_file_to_node(node: dict, src: str, dest: str, use_sudo: bool, tim
     host = node['host']
     user = node['user']
     name = node['name']
-    
+
     isdir = os.path.isdir(src)
 
     try:
@@ -32,32 +34,38 @@ async def copy_file_to_node(node: dict, src: str, dest: str, use_sudo: bool, tim
                         async with conn.create_process(f"sudo tar xzf - -C {dest}", encoding=None) as process:
                             while True:
                                 chunk = await proc.stdout.read(65536)
-                                if not chunk: break
+                                if not chunk:
+                                    break
                                 process.stdin.write(chunk)
                                 await process.stdin.drain()
                             process.stdin.write_eof()
                             await process.wait()
-                            if process.exit_status != 0: 
-                                raise Exception(f"Tar stream failed remotely (Exit: {process.exit_status})")
+                            if process.exit_status != 0:
+                                raise Exception(
+                                    f"Tar stream failed remotely (Exit: {process.exit_status})")
                         await proc.wait()
-                        if proc.returncode != 0: 
-                            raise Exception(f"Tar stream failed locally (Exit: {proc.returncode})")
+                        if proc.returncode != 0:
+                            raise Exception(
+                                f"Tar stream failed locally (Exit: {proc.returncode})")
                         return "📁 Tar-Stream (root)"
                     else:
                         await conn.run(f"mkdir -p {dest}", check=True)
                         async with conn.create_process(f"tar xzf - -C {dest}", encoding=None) as process:
                             while True:
                                 chunk = await proc.stdout.read(65536)
-                                if not chunk: break
+                                if not chunk:
+                                    break
                                 process.stdin.write(chunk)
                                 await process.stdin.drain()
                             process.stdin.write_eof()
                             await process.wait()
-                            if process.exit_status != 0: 
-                                raise Exception(f"Tar stream failed remotely (Exit: {process.exit_status})")
+                            if process.exit_status != 0:
+                                raise Exception(
+                                    f"Tar stream failed remotely (Exit: {process.exit_status})")
                         await proc.wait()
-                        if proc.returncode != 0: 
-                            raise Exception(f"Tar stream failed locally (Exit: {proc.returncode})")
+                        if proc.returncode != 0:
+                            raise Exception(
+                                f"Tar stream failed locally (Exit: {proc.returncode})")
                         return "📁 Tar-Stream"
             else:
                 async with asyncssh.connect(host, username=user) as conn:
@@ -102,9 +110,12 @@ async def main():
                         help="Remote destination file path")
     parser.add_argument("--sudo", action="store_true",
                         help="Copy file with sudo (changes ownership to root)")
-    parser.add_argument("-g", "--group", help="Target a specific group from nodes.yml")
-    parser.add_argument("-t", "--timeout", type=int, default=0, help="Timeout in seconds")
-    parser.add_argument("--no-rich", action="store_true", help="Disable Rich UI output")
+    parser.add_argument(
+        "-g", "--group", help="Target a specific group from nodes.yml")
+    parser.add_argument("-t", "--timeout", type=int,
+                        default=0, help="Timeout in seconds")
+    parser.add_argument("--no-rich", action="store_true",
+                        help="Disable Rich UI output")
 
     args = parser.parse_args()
 
@@ -115,7 +126,7 @@ async def main():
 
     # Load inventory
     nodes = load_inventory(args.inventory)
-    
+
     # Filter nodes by group if specified
     if args.group:
         nodes = [n for n in nodes if n.get('group') == args.group]
@@ -124,8 +135,9 @@ async def main():
         print("No target nodes found in the inventory matching criteria.")
         sys.exit(0)
 
-    tasks = [copy_file_to_node(node, args.src, args.dest, args.sudo, args.timeout) for node in nodes]
-    
+    tasks = [copy_file_to_node(
+        node, args.src, args.dest, args.sudo, args.timeout) for node in nodes]
+
     rich_success = False
     if not args.no_rich:
         try:
@@ -136,19 +148,22 @@ async def main():
                 results = await asyncio.gather(*tasks)
 
             # Render summary table
-            table = Table(title="Copy Summary", show_header=True, header_style="bold magenta")
+            table = Table(title="Copy Summary", show_header=True,
+                          header_style="bold magenta")
             table.add_column("Node", style="cyan")
             table.add_column("Host", style="blue")
             table.add_column("Status")
             table.add_column("Details", style="dim")
 
             for res in results:
-                table.add_row(res['node'], res['host'], res['status'], res['details'])
+                table.add_row(res['node'], res['host'],
+                              res['status'], res['details'])
 
             console.print(table)
             rich_success = True
         except ImportError:
-            print("Warning: The 'rich' module is not installed. Falling back to simple output.\n")
+            print(
+                "Warning: The 'rich' module is not installed. Falling back to simple output.\n")
 
     if not rich_success:
         print(f"Copying '{args.src}' to {len(nodes)} nodes...\n" + "="*50)
@@ -156,7 +171,8 @@ async def main():
         import re
         for res in results:
             clean_status = re.sub(r'\[.*?\]', '', res['status'])
-            print(f"[{res['node']} ({res['host']})] {clean_status} -> {res['details']}")
+            print(
+                f"[{res['node']} ({res['host']})] {clean_status} -> {res['details']}")
 
 if __name__ == "__main__":
     # Gracefully run the asyncio event loop
