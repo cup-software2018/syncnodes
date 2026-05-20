@@ -1,0 +1,4 @@
+asyncssh
+PySide6>=6.0
+pyyaml
+rich

@@ -1,0 +1,12 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=syncnodes
+GenericName=Multi-node SSH Manager
+Comment=Run commands and sync files across multiple SSH nodes
+Exec=SYNCNODES_EXEC
+Icon=syncnodes
+Categories=Network;System;RemoteAccess;
+Keywords=ssh;sync;nodes;remote;command;copy;
+Terminal=false
+StartupNotify=true

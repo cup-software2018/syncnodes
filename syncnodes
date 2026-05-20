@@ -1,0 +1,674 @@
+#!/usr/bin/env python3
+
+import os
+import sys
+from pathlib import Path
+from typing import List
+
+ROOT = Path(__file__).resolve().parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+try:
+    from PySide6.QtWidgets import (
+        QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
+        QLineEdit, QPushButton, QCheckBox, QSpinBox, QFileDialog, QTableWidget,
+        QTableWidgetItem, QFormLayout, QComboBox, QTextEdit,
+        QHeaderView, QFrame, QStackedWidget, QRadioButton, QButtonGroup,
+    )
+    from PySide6.QtCore import Qt, QThread, Signal, QObject
+    from PySide6.QtGui import QPalette, QColor
+except Exception as e:
+    print("PySide6 is required to run the GUI. Install with: pip install -r requirements.txt")
+    raise
+
+
+# Only QPushButton#primary is safe to style via QSS (no sub-controls / scroll areas).
+# All other colors are applied via QPalette to avoid the Qt painter-state bug
+# that fires when QSS touches QAbstractScrollArea subclasses (QTableWidget, QTextEdit, etc.)
+PRIMARY_BTN_QSS = """
+QPushButton#primary {
+    background-color: #3584e4;
+    color: #ffffff;
+    border: none;
+    font-weight: bold;
+    padding: 5px 14px;
+}
+QPushButton#primary:hover   { background-color: #1c71d8; }
+QPushButton#primary:pressed { background-color: #1558b0; }
+QPushButton#primary:disabled { background-color: #c0d8f8; color: #e0e8f8; border: none; }
+"""
+
+
+def _setup_app(app: QApplication) -> None:
+    from PySide6.QtGui import QFont
+    app.setStyle("Fusion")
+    app.setFont(QFont("Cantarell", 11))
+
+    C = QColor
+    p = QPalette()
+    p.setColor(QPalette.Window,          C("#fafafa"))
+    p.setColor(QPalette.WindowText,      C("#2e3436"))
+    p.setColor(QPalette.Base,            C("#ffffff"))
+    p.setColor(QPalette.AlternateBase,   C("#f6f5f4"))
+    p.setColor(QPalette.Text,            C("#2e3436"))
+    p.setColor(QPalette.Button,          C("#f0f0f0"))
+    p.setColor(QPalette.ButtonText,      C("#2e3436"))
+    p.setColor(QPalette.Highlight,       C("#3584e4"))
+    p.setColor(QPalette.HighlightedText, C("#ffffff"))
+    p.setColor(QPalette.Light,           C("#ffffff"))
+    p.setColor(QPalette.Midlight,        C("#e8e8e8"))
+    p.setColor(QPalette.Mid,             C("#d4d4d4"))
+    p.setColor(QPalette.Dark,            C("#9a9996"))
+    p.setColor(QPalette.Shadow,          C("#c8c8c8"))
+    p.setColor(QPalette.Link,            C("#3584e4"))
+    p.setColor(QPalette.Disabled, QPalette.Text,       C("#9a9996"))
+    p.setColor(QPalette.Disabled, QPalette.ButtonText, C("#9a9996"))
+    p.setColor(QPalette.Disabled, QPalette.WindowText, C("#9a9996"))
+    app.setPalette(p)
+    app.setStyleSheet(PRIMARY_BTN_QSS)
+
+
+def find_inventory_path() -> str:
+    cwd_candidate = Path.cwd() / "nodes.yml"
+    repo_candidate = ROOT / "nodes.yml"
+    if cwd_candidate.exists():
+        return str(cwd_candidate)
+    if repo_candidate.exists():
+        return str(repo_candidate)
+    return str(cwd_candidate)
+
+
+class WorkerSignals(QObject):
+    progress = Signal(object)  # emits a single result dict
+    finished = Signal()
+    error = Signal(str)
+
+
+class RunWorker(QObject):
+    """Worker that runs async nodectl/copyctl functions in a separate thread.
+
+    Emits progress signals for each node result and a finished signal when done.
+    """
+
+    def __init__(self, action: str, nodes: list, params: dict):
+        super().__init__()
+        self.signals = WorkerSignals()
+        self._action = action
+        self._nodes = nodes
+        self._params = params
+
+    def run(self):
+        try:
+            import asyncio
+            from utils import run_command_on_node, copy_file_to_node
+
+            if self._action == "command":
+                fn = run_command_on_node
+                args = (self._params.get('command', ''),
+                        self._params.get('sudo', False),
+                        self._params.get('timeout', 0))
+            elif self._action == "copy":
+                fn = copy_file_to_node
+                args = (self._params.get('src', ''),
+                        self._params.get('dest', ''),
+                        self._params.get('sudo', False),
+                        self._params.get('timeout', 0))
+            else:
+                self.signals.error.emit(f"Unknown action: {self._action}")
+                return
+
+            async def _runner():
+                tasks = [fn(n, *args) for n in self._nodes]
+                for coro in asyncio.as_completed(tasks):
+                    self.signals.progress.emit(await coro)
+
+            asyncio.run(_runner())
+        except Exception:
+            import traceback
+            self.signals.error.emit(traceback.format_exc())
+        finally:
+            self.signals.finished.emit()
+
+
+class SectionLabel(QLabel):
+    def __init__(self, text, parent=None):
+        super().__init__(text.upper(), parent)
+        self.setStyleSheet(
+            "color: #9a9996; font-size: 10px; font-weight: bold; letter-spacing: 2px;"
+        )
+
+
+class StepBar(QWidget):
+    _STEPS = ["① Select Nodes", "② Set Action", "③ Results"]
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(20, 0, 20, 0)
+        layout.setSpacing(6)
+        self._labels: List[QLabel] = []
+        for i, name in enumerate(self._STEPS):
+            lbl = QLabel(name)
+            self._labels.append(lbl)
+            layout.addWidget(lbl)
+            if i < len(self._STEPS) - 1:
+                arr = QLabel("──▶")
+                arr.setStyleSheet("color: #c0bfbd; font-size: 10px;")
+                layout.addWidget(arr)
+        layout.addStretch()
+        self._refresh(0)
+
+    def set_step(self, step: int):
+        self._current = step
+        self._refresh(step)
+
+    def _refresh(self, step: int):
+        for i, lbl in enumerate(self._labels):
+            if i == step:
+                lbl.setStyleSheet(
+                    "color: #3584e4; font-weight: bold; font-size: 15px;")
+            elif i < step:
+                lbl.setStyleSheet("color: #9a9996; font-size: 15px;")
+            else:
+                lbl.setStyleSheet("color: #c0bfbd; font-size: 15px;")
+
+
+class MainWindow(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("syncnodes")
+        self.resize(900, 580)
+        self.inventory_path = find_inventory_path()
+        self._nodes: List[dict] = []
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        # ── header ──────────────────────────────────────────────────────────
+        header = QWidget()
+        header.setFixedHeight(36)
+        header.setStyleSheet(
+            "background-color: #deddda; border-bottom: 1px solid #c8c6c4;")
+        hlay = QHBoxLayout(header)
+        hlay.setContentsMargins(14, 0, 14, 0)
+        title = QLabel("syncnodes")
+        title.setStyleSheet(
+            "color: #2e3436; font-size: 13px; font-weight: bold; letter-spacing: 0px;")
+        hlay.addWidget(title)
+        hlay.addStretch()
+        root.addWidget(header)
+
+        # ── step bar ─────────────────────────────────────────────────────────
+        step_wrap = QWidget()
+        step_wrap.setFixedHeight(44)
+        step_wrap.setStyleSheet(
+            "background: #f6f5f4; border-bottom: 1px solid #d4d4d4;")
+        self._stepbar = StepBar()
+        sw_lay = QHBoxLayout(step_wrap)
+        sw_lay.setContentsMargins(0, 0, 0, 0)
+        sw_lay.addWidget(self._stepbar)
+        root.addWidget(step_wrap)
+
+        # ── pages ────────────────────────────────────────────────────────────
+        self._stack = QStackedWidget()
+        self._stack.addWidget(self._page_nodes())
+        self._stack.addWidget(self._page_action())
+        self._stack.addWidget(self._page_results())
+        root.addWidget(self._stack)
+
+        self.load_inventory()
+
+    # ── page builders ─────────────────────────────────────────────────────────
+
+    def _page_nodes(self) -> QWidget:
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        lay.setContentsMargins(20, 16, 20, 16)
+        lay.setSpacing(10)
+
+        lay.addWidget(SectionLabel("Inventory"))
+
+        # file path
+        self.inv_path_edit = QLineEdit(self.inventory_path)
+        self.inv_path_edit.setReadOnly(True)
+        self.inv_path_edit.setStyleSheet("color: #9a9996; font-size: 10px;")
+        browse_btn = QPushButton("…")
+        browse_btn.setFixedWidth(28)
+        browse_btn.setToolTip("Browse inventory file")
+        browse_btn.clicked.connect(self.browse_inventory)
+        self.inv_browse_btn = browse_btn
+
+        path_row = QHBoxLayout()
+        path_row.setSpacing(4)
+        path_row.addWidget(QLabel("File:"))
+        path_row.addWidget(self.inv_path_edit)
+        path_row.addWidget(browse_btn)
+        lay.addLayout(path_row)
+
+        # group filter + refresh
+        self.group_filter = QComboBox()
+        self.group_filter.addItem("(All)")
+        self.group_filter.currentIndexChanged.connect(self.load_inventory)
+        refresh_btn = QPushButton("↺")
+        refresh_btn.setFixedWidth(30)
+        refresh_btn.setToolTip("Refresh")
+        refresh_btn.clicked.connect(self.load_inventory)
+        self.refresh_btn = refresh_btn
+
+        grp_row = QHBoxLayout()
+        grp_row.setSpacing(6)
+        grp_row.addWidget(QLabel("Group:"))
+        grp_row.addWidget(self.group_filter)
+        grp_row.addStretch()
+        grp_row.addWidget(refresh_btn)
+        lay.addLayout(grp_row)
+
+        # node table: col 0 = checkbox, 1 = name, 2 = host, 3 = user, 4 = group
+        self.inv_table = QTableWidget(0, 5)
+        self.inv_table.setHorizontalHeaderLabels(
+            ["", "Node", "Host", "User", "Group"])
+        self.inv_table.setSelectionMode(QTableWidget.NoSelection)
+        self.inv_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.inv_table.verticalHeader().setVisible(False)
+        self.inv_table.setAlternatingRowColors(True)
+        self.inv_table.setShowGrid(False)
+        hdr = self.inv_table.horizontalHeader()
+        hdr.setSectionResizeMode(0, QHeaderView.Fixed)
+        self.inv_table.setColumnWidth(0, 28)
+        hdr.setSectionResizeMode(1, QHeaderView.Stretch)
+        hdr.setSectionResizeMode(2, QHeaderView.Stretch)
+        hdr.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        hdr.setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        self.inv_table.itemChanged.connect(self._refresh_sel_label)
+        lay.addWidget(self.inv_table)
+
+        # bottom: count + next
+        self._sel_label = QLabel("0 nodes selected")
+        self._sel_label.setStyleSheet("color: #9a9996; font-size: 10px;")
+        self._next_btn = QPushButton("Next  →")
+        self._next_btn.setObjectName("primary")
+        self._next_btn.setFixedWidth(120)
+        self._next_btn.setFixedHeight(30)
+        self._next_btn.setEnabled(False)
+        self._next_btn.clicked.connect(self._go_to_action)
+
+        bot = QHBoxLayout()
+        bot.addWidget(self._sel_label)
+        bot.addStretch()
+        bot.addWidget(self._next_btn)
+        lay.addLayout(bot)
+
+        return page
+
+    def _page_action(self) -> QWidget:
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        lay.setContentsMargins(20, 16, 20, 16)
+        lay.setSpacing(12)
+
+        self._target_label = QLabel()
+        self._target_label.setStyleSheet("color: #77767b; font-size: 11px;")
+        lay.addWidget(self._target_label)
+
+        # radio: Command | Copy
+        self._radio_cmd = QRadioButton("Command")
+        self._radio_copy = QRadioButton("Copy")
+        self._radio_cmd.setChecked(True)
+        self._radio_grp = QButtonGroup(self)
+        self._radio_grp.addButton(self._radio_cmd, 0)
+        self._radio_grp.addButton(self._radio_copy, 1)
+        self._radio_grp.idToggled.connect(self._on_action_toggled)
+
+        radio_row = QHBoxLayout()
+        radio_row.setSpacing(20)
+        radio_row.addWidget(self._radio_cmd)
+        radio_row.addWidget(self._radio_copy)
+        radio_row.addStretch()
+        lay.addLayout(radio_row)
+
+        sep = QFrame()
+        sep.setFrameShape(QFrame.HLine)
+        sep.setStyleSheet(
+            "background: #d4d4d4; max-height: 1px; border: none;")
+        lay.addWidget(sep)
+
+        # form stack
+        self._form_stack = QStackedWidget()
+        self._form_stack.addWidget(self._form_cmd())
+        self._form_stack.addWidget(self._form_copy())
+        lay.addWidget(self._form_stack)
+
+        lay.addStretch()
+
+        nav = QHBoxLayout()
+        back = QPushButton("←  Back")
+        back.setFixedWidth(100)
+        back.clicked.connect(self._go_back)
+        run = QPushButton("▶  Run")
+        run.setObjectName("primary")
+        run.setFixedWidth(120)
+        run.setFixedHeight(30)
+        run.clicked.connect(self._dispatch_run)
+        self._run_btn = run
+        nav.addWidget(back)
+        nav.addStretch()
+        nav.addWidget(run)
+        lay.addLayout(nav)
+
+        return page
+
+    def _form_cmd(self) -> QWidget:
+        w = QWidget()
+        form = QFormLayout(w)
+        form.setSpacing(10)
+        form.setLabelAlignment(Qt.AlignRight)
+
+        self.cmd_input = QLineEdit()
+        self.cmd_input.setPlaceholderText("e.g.  uptime")
+        self.cmd_timeout = QSpinBox()
+        self.cmd_timeout.setRange(0, 3600)
+        self.cmd_timeout.setValue(0)
+        self.cmd_timeout.setSuffix("  s")
+        self.cmd_timeout.setSpecialValueText("no limit")
+        self.cmd_sudo = QCheckBox("Use sudo")
+
+        form.addRow("Command:", self.cmd_input)
+        form.addRow("Timeout:", self.cmd_timeout)
+        form.addRow("", self.cmd_sudo)
+        return w
+
+    def _form_copy(self) -> QWidget:
+        w = QWidget()
+        form = QFormLayout(w)
+        form.setSpacing(10)
+        form.setLabelAlignment(Qt.AlignRight)
+
+        self.copy_src = QLineEdit()
+        self.copy_src.setPlaceholderText("/local/path/to/file")
+        src_btn = QPushButton("…")
+        src_btn.setFixedWidth(28)
+        src_btn.setToolTip("Browse source file")
+        src_btn.clicked.connect(self.browse_src)
+        self.copy_src_btn = src_btn
+        src_row = QHBoxLayout()
+        src_row.setSpacing(4)
+        src_row.addWidget(self.copy_src)
+        src_row.addWidget(src_btn)
+
+        self.copy_dest = QLineEdit()
+        self.copy_dest.setPlaceholderText("/remote/destination/")
+        self.copy_timeout = QSpinBox()
+        self.copy_timeout.setRange(0, 3600)
+        self.copy_timeout.setValue(0)
+        self.copy_timeout.setSuffix("  s")
+        self.copy_timeout.setSpecialValueText("no limit")
+        self.copy_sudo = QCheckBox("Use sudo")
+
+        form.addRow("Source:", src_row)
+        form.addRow("Destination:", self.copy_dest)
+        form.addRow("Timeout:", self.copy_timeout)
+        form.addRow("", self.copy_sudo)
+        return w
+
+    def _page_results(self) -> QWidget:
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        lay.setContentsMargins(20, 16, 20, 16)
+        lay.setSpacing(10)
+
+        lay.addWidget(SectionLabel("Results"))
+
+        split = QHBoxLayout()
+        split.setSpacing(12)
+
+        self.results_table = QTableWidget(0, 2)
+        self.results_table.setHorizontalHeaderLabels(["Node", "Status"])
+        self.results_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.results_table.horizontalHeader().setSectionResizeMode(
+            1, QHeaderView.ResizeToContents)
+        self.results_table.setAlternatingRowColors(True)
+        self.results_table.setShowGrid(False)
+        self.results_table.verticalHeader().setVisible(False)
+        self.results_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.results_table.cellClicked.connect(self.on_result_selected)
+        split.addWidget(self.results_table, 2)
+
+        self.log_view = QTextEdit()
+        self.log_view.setReadOnly(True)
+        self.log_view.setPlaceholderText("Select a row to view output.")
+        split.addWidget(self.log_view, 3)
+
+        lay.addLayout(split)
+
+        nav = QHBoxLayout()
+        new_run = QPushButton("←  New Run")
+        new_run.setFixedWidth(120)
+        new_run.clicked.connect(self._go_to_start)
+        clear = QPushButton("Clear")
+        clear.setFixedWidth(80)
+        clear.clicked.connect(self._clear_results)
+        nav.addWidget(new_run)
+        nav.addStretch()
+        nav.addWidget(clear)
+        lay.addLayout(nav)
+
+        return page
+
+    # ── navigation ────────────────────────────────────────────────────────────
+
+    def _go_to_action(self):
+        targets = self._selected_nodes()
+        if not targets:
+            return
+        n = len(targets)
+        self._target_label.setText(
+            f"Targeting {n} node{'s' if n != 1 else ''}")
+        self._stack.setCurrentIndex(1)
+        self._stepbar.set_step(1)
+
+    def _go_to_results(self):
+        self._stack.setCurrentIndex(2)
+        self._stepbar.set_step(2)
+
+    def _go_back(self):
+        idx = self._stack.currentIndex()
+        if idx > 0:
+            self._stack.setCurrentIndex(idx - 1)
+            self._stepbar.set_step(idx - 1)
+
+    def _go_to_start(self):
+        self._stack.setCurrentIndex(0)
+        self._stepbar.set_step(0)
+
+    def _dispatch_run(self):
+        # Prepare targets and params, then start worker thread to perform actions
+        targets = self._selected_nodes()
+        if not targets:
+            return
+
+        if self._radio_cmd.isChecked():
+            action = "command"
+            params = {
+                'command': self.cmd_input.text().strip() or "echo hello",
+                'sudo': self.cmd_sudo.isChecked(),
+                'timeout': int(self.cmd_timeout.value()),
+            }
+        else:
+            action = "copy"
+            params = {
+                'src': self.copy_src.text().strip(),
+                'dest': self.copy_dest.text().strip(),
+                'sudo': self.copy_sudo.isChecked(),
+                'timeout': int(self.copy_timeout.value()),
+            }
+
+        self._run_btn.setEnabled(False)
+        self._run_btn.setText("Running…")
+        self.results_table.setRowCount(0)
+        self.log_view.clear()
+        self._go_to_results()
+
+        self._worker = RunWorker(action, targets, params)
+        self._thread = QThread()
+        self._worker.moveToThread(self._thread)
+        self._thread.started.connect(self._worker.run)
+        self._worker.signals.progress.connect(self._on_worker_progress)
+        self._worker.signals.error.connect(self._on_worker_error)
+        self._worker.signals.finished.connect(self._on_worker_finished)
+        self._thread.start()
+
+    def _on_action_toggled(self, btn_id: int, checked: bool):
+        if checked:
+            self._form_stack.setCurrentIndex(btn_id)
+
+    def _refresh_sel_label(self):
+        count = sum(
+            1 for row in range(self.inv_table.rowCount())
+            if self.inv_table.item(row, 0)
+            and self.inv_table.item(row, 0).checkState() == Qt.Checked
+        )
+        self._sel_label.setText(
+            f"{count} node{'s' if count != 1 else ''} selected")
+        self._next_btn.setEnabled(count > 0)
+
+    def _clear_results(self):
+        self.results_table.setRowCount(0)
+        self.log_view.clear()
+
+    def _on_worker_progress(self, res: dict):
+        from utils import strip_rich
+
+        name = res.get('node') or str(res.get('host', ''))
+        clean_status = strip_rich(res.get('status', ''))
+        display = res.get('display', '')
+        logpath = res.get('log')
+
+        details = f"Log: {logpath}\n{display}" if logpath and logpath != '-' else display
+
+        row = self.results_table.rowCount()
+        self.results_table.insertRow(row)
+        item = QTableWidgetItem(name)
+        item.setData(Qt.UserRole, details)
+        self.results_table.setItem(row, 0, item)
+        self.results_table.setItem(row, 1, QTableWidgetItem(clean_status))
+
+    def _on_worker_error(self, tb: str):
+        # show traceback in log view
+        self.log_view.setPlainText(tb)
+
+    def _on_worker_finished(self):
+        self._run_btn.setEnabled(True)
+        self._run_btn.setText("▶  Run")
+        try:
+            self._thread.quit()
+            self._thread.wait(1000)
+        except Exception:
+            pass
+
+    # ── data ─────────────────────────────────────────────────────────────────
+
+    def load_inventory(self):
+        try:
+            from utils import load_inventory
+        except Exception as e:
+            self.inv_table.setRowCount(1)
+            self.inv_table.setItem(
+                0, 1, QTableWidgetItem(f"Error loading utils: {e}"))
+            return
+
+        try:
+            nodes = load_inventory(self.inventory_path)
+        except SystemExit:
+            self.inv_table.setRowCount(1)
+            self.inv_table.setItem(0, 1, QTableWidgetItem(
+                f"Inventory not found or invalid: {self.inventory_path}"))
+            return
+        except Exception as e:
+            self.inv_table.setRowCount(1)
+            self.inv_table.setItem(0, 1, QTableWidgetItem(f"Error: {e}"))
+            return
+
+        selected_group = self.group_filter.currentText()
+        all_groups = sorted({n.get('group', '')
+                            for n in nodes if n.get('group')})
+        if selected_group and selected_group != "(All)":
+            nodes = [n for n in nodes if n.get('group') == selected_group]
+
+        self._nodes = nodes
+        self.inv_table.blockSignals(True)
+        self.inv_table.setRowCount(0)
+        self.group_filter.blockSignals(True)
+        try:
+            self.group_filter.clear()
+            self.group_filter.addItem("(All)")
+            for g in all_groups:
+                self.group_filter.addItem(g)
+
+            for n in nodes:
+                row = self.inv_table.rowCount()
+                self.inv_table.insertRow(row)
+                chk = QTableWidgetItem()
+                chk.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
+                chk.setCheckState(Qt.Checked)
+                self.inv_table.setItem(row, 0, chk)
+                self.inv_table.setItem(
+                    row, 1, QTableWidgetItem(n.get('name', '')))
+                self.inv_table.setItem(
+                    row, 2, QTableWidgetItem(n.get('host', '')))
+                self.inv_table.setItem(
+                    row, 3, QTableWidgetItem(n.get('user', '')))
+                self.inv_table.setItem(
+                    row, 4, QTableWidgetItem(n.get('group', '')))
+
+            if selected_group and selected_group != "(All)":
+                idx = self.group_filter.findText(selected_group)
+                if idx >= 0:
+                    self.group_filter.setCurrentIndex(idx)
+        finally:
+            self.group_filter.blockSignals(False)
+            self.inv_table.blockSignals(False)
+
+        self._refresh_sel_label()
+
+    def browse_src(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Select file to copy")
+        if path:
+            self.copy_src.setText(path)
+
+    def browse_inventory(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select inventory YAML",
+            filter="YAML Files (*.yml *.yaml);;All Files (*)")
+        if path:
+            self.inventory_path = path
+            self.inv_path_edit.setText(path)
+            self.load_inventory()
+
+    def _selected_nodes(self) -> List[dict]:
+        result = []
+        for row in range(self.inv_table.rowCount()):
+            chk = self.inv_table.item(row, 0)
+            if chk and chk.checkState() == Qt.Checked and row < len(self._nodes):
+                result.append(self._nodes[row])
+        return result
+
+    def on_result_selected(self, row: int, col: int):
+        item = self.results_table.item(row, 0)
+        if item:
+            details = item.data(Qt.UserRole)
+            if details:
+                self.log_view.setPlainText(details)
+
+
+def main():
+    app = QApplication(sys.argv)
+    _setup_app(app)
+    w = MainWindow()
+    w.show()
+    sys.exit(app.exec())
+
+
+if __name__ == "__main__":
+    main()

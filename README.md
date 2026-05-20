@@ -1,46 +1,51 @@
 # syncnodes
 
-`syncnodes` is a lightweight, asynchronous Python toolset designed for managing operations across a cluster of servers concurrently via SSH. Built on top of `asyncio` and `asyncssh`, it allows commands to be executed and files to be distributed to multiple nodes simultaneously, drastically reducing management time.
+A lightweight async Python toolset for managing multiple servers over SSH — run commands and distribute files across your cluster in parallel.
+
+Includes a **GUI** (`syncnodes`) and two **CLI tools** (`nodectl`, `copyctl`), all backed by a shared async core (`utils.py`).
 
 ## Features
 
-* **Asynchronous Execution:** Run shell commands and copy files to all nodes in parallel.
-* **Remote Command Execution (`nodectl`):** Execute arbitrary SSH shell commands across your cluster.
-* **File & Directory Distribution (`copyctl`):** Push local files and whole directory trees to remote destinations recursively over SFTP.
-* **Execution Timeout:** Stop unresponsive workers from blocking sequences via the `--timeout` parameter.
-* **Group Targeting:** Easily filter your execution scope down to subsets of your cluster using YAML `group` attributes.
-* **Sudo Support:** Seamlessly execute commands and copy files to restricted directories using `--sudo` (requires passwordless sudo).
-* **Rich Dashboard UI:** Enjoy a beautiful live progress spinner and post-execution summary tables built on `rich`.
-* **Centralized Logging:** Detailed logs of standard output and standard error for `nodectl` executions are automatically neatly saved per node in a local `logs/` directory.
-* **Simple Inventory Management:** Manage your target nodes easily through a YAML inventory file.
+- **Parallel execution** — async SSH via `asyncio` + `asyncssh`; all nodes run concurrently
+- **GUI** — wizard-style PySide6 app: select nodes → configure action → view results
+- **`nodectl`** — run shell commands across the cluster
+- **`copyctl`** — push files or entire directory trees over SFTP
+- **Group targeting** — filter nodes by `group` field in inventory
+- **Sudo support** — passwordless sudo for restricted destinations
+- **Timeout** — per-operation timeout to avoid hanging
+- **Rich output** — live spinner + summary table in the terminal (optional)
+- **Per-node logs** — full stdout/stderr saved to `logs/<node>_result.log`
+
+## Installation
+
+```bash
+./install.sh
+```
+
+Installs dependencies, copies files to `~/.local/lib/syncnodes/`, registers the app in the GNOME app grid, and creates symlinks in `~/.local/bin/`.
+
+Or install dependencies manually:
+
+```bash
+pip install -r requirements.txt
+```
 
 ## Prerequisites
 
-* Python 3.7+
-* SSH key-based authentication must be set up properly between the current user and the target node users.
-* Passwordless `sudo` must be configured for the target user on the remote nodes if you intend to use the `--sudo` flags.
+- Python 3.7+
+- SSH key-based authentication to all target nodes
+- Passwordless `sudo` on remote nodes if using `--sudo`
 
-#### Configuring Passwordless Sudo
-To allow a user (e.g., `johndoe`) to execute `sudo` commands without a password prompt, you must edit the `/etc/sudoers` file on the target nodes. 
-**Run `sudo visudo`** and add the following line at the end of the file:
+To enable passwordless sudo for a user (e.g. `johndoe`), run `sudo visudo` on each target node and add:
+
 ```text
 johndoe ALL=(ALL) NOPASSWD: ALL
 ```
-*(Replace `johndoe` with your actual username)*
 
-### Dependencies
+## Inventory
 
-Install the necessary Python requirements:
+Create a `nodes.yml` in the project directory (see `nodes.yml.example`):
 
-```bash
-pip install asyncssh pyyaml rich
-```
-
-## Configuration
-
-Define your node inventory in a YAML file (e.g., `nodes.yml`). The tool uses this file to connect to multiple hosts.
-
-Example `nodes.yml`:
 ```yaml
 nodes:
   - name: node1
@@ -51,50 +56,74 @@ nodes:
     host: 192.168.1.12
     user: johndoe
     group: worker
-  # List all your cluster nodes here
 ```
 
-## Usage
-
-### 1. `nodectl` - Command Execution Manager
-
-Run a CLI command across all nodes concurrently.
-
-**Arguments:**
-* `-i`, `--inventory`: Path to the inventory YAML file (default: `nodes.yml`)
-* `-c`, `--command`: Linux command to execute (required)
-* `-g`, `--group`: Target a specific group from `nodes.yml`
-* `-t`, `--timeout`: Timeout in seconds (default: 0 / no timeout)
-* `--sudo`: Execute command with `sudo` privileges
-
-**Examples:**
+## GUI
 
 ```bash
-# Check the disk usage on all targets in the 'control' group (nodes.yml is implicit)
-./nodectl -c "df -h" -g control
-
-# Clean up a system directory requiring sudo, limiting hanging to 5s
-./nodectl -c "rm -rf /tmp/cache_folder" --sudo -t 5
+./syncnodes
+# or after install:
+syncnodes
 ```
 
-### 2. `copyctl` - File & Directory Distribution Tool
+Three-step wizard:
+1. **Select Nodes** — pick from inventory, filter by group
+2. **Set Action** — Command or Copy, with timeout and sudo options
+3. **Results** — per-node status and output log
 
-Distribute a local file or recursive directory structure to nodes concurrently using SFTP. Handles proper user/root ownership automatically.
+## CLI
 
-**Arguments:**
-* `-i`, `--inventory`: Path to the inventory YAML file (default: `nodes.yml`)
-* `-s`, `--src`: Local source file or directory path (required)
-* `-d`, `--dest`: Remote destination file or directory path (required)
-* `-g`, `--group`: Target a specific group from `nodes.yml`
-* `-t`, `--timeout`: Timeout in seconds
-* `--sudo`: Copy file/folder utilizing `sudo` (temporarily stages in `/tmp`, moves using `sudo`, and resets ownership to `root:root`)
-
-**Examples:**
+### `nodectl` — Command Execution
 
 ```bash
-# Push an executable script to the 'worker' group
-./copyctl -s ./start_service.sh -d /home/johndoe/start_service.sh -g worker
+# Run on all nodes
+./nodectl -c "uptime"
 
-# Recursively distribute a root-owned configurations folder across the cluster
-./copyctl -s ./ansible_configs -d /etc/ansible --sudo
+# Target a group with sudo and timeout
+./nodectl -c "systemctl restart nginx" -g worker --sudo -t 30
+
+# Rich table output
+./nodectl -c "df -h" --rich
+```
+
+| Flag | Description |
+|------|-------------|
+| `-i` | Inventory file (default: `nodes.yml`) |
+| `-c` | Command to run (required) |
+| `-g` | Target group |
+| `-t` | Timeout in seconds |
+| `--sudo` | Run with sudo |
+| `--rich` | Enable Rich UI |
+
+### `copyctl` — File & Directory Distribution
+
+```bash
+# Push a file to all nodes
+./copyctl -s ./deploy.sh -d /home/johndoe/deploy.sh
+
+# Recursively push a directory as root to a group
+./copyctl -s ./configs -d /etc/myapp -g control --sudo
+```
+
+| Flag | Description |
+|------|-------------|
+| `-i` | Inventory file (default: `nodes.yml`) |
+| `-s` | Local source file or directory (required) |
+| `-d` | Remote destination path (required) |
+| `-g` | Target group |
+| `-t` | Timeout in seconds |
+| `--sudo` | Stage in `/tmp`, move with sudo, set `root:root` ownership |
+| `--no-rich` | Disable Rich UI |
+
+## Project Structure
+
+```
+syncnodes        # GUI application (PySide6)
+nodectl          # CLI: remote command execution
+copyctl          # CLI: file/directory distribution
+utils.py         # Shared core: SSH functions, inventory loader
+nodes.yml        # Your node inventory
+requirements.txt # Python dependencies
+install.sh       # GNOME desktop installer
+syncnodes.svg    # App icon
 ```
