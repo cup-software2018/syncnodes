@@ -479,8 +479,20 @@ class MainWindow(QWidget):
             self._stepbar.set_step(idx - 1)
 
     def _go_to_start(self):
+        self._reset_action_form()
         self._stack.setCurrentIndex(0)
         self._stepbar.set_step(0)
+
+    def _reset_action_form(self):
+        self._radio_cmd.setChecked(True)
+        self._form_stack.setCurrentIndex(0)
+        self.cmd_input.clear()
+        self.cmd_timeout.setValue(0)
+        self.cmd_sudo.setChecked(False)
+        self.copy_src.clear()
+        self.copy_dest.clear()
+        self.copy_timeout.setValue(0)
+        self.copy_sudo.setChecked(False)
 
     def _dispatch_run(self):
         # Prepare targets and params, then start worker thread to perform actions
@@ -545,12 +557,11 @@ class MainWindow(QWidget):
         display = res.get('display', '')
         logpath = res.get('log')
 
-        details = f"Log: {logpath}\n{display}" if logpath and logpath != '-' else display
-
         row = self.results_table.rowCount()
         self.results_table.insertRow(row)
         item = QTableWidgetItem(name)
-        item.setData(Qt.UserRole, details)
+        item.setData(Qt.UserRole, logpath if logpath and logpath != '-' else None)
+        item.setData(Qt.UserRole + 1, display)
         self.results_table.setItem(row, 0, item)
         self.results_table.setItem(row, 1, QTableWidgetItem(clean_status))
 
@@ -656,10 +667,17 @@ class MainWindow(QWidget):
 
     def on_result_selected(self, row: int, col: int):
         item = self.results_table.item(row, 0)
-        if item:
-            details = item.data(Qt.UserRole)
-            if details:
-                self.log_view.setPlainText(details)
+        if not item:
+            return
+        logpath = item.data(Qt.UserRole)
+        fallback = item.data(Qt.UserRole + 1) or ""
+        if logpath:
+            try:
+                self.log_view.setPlainText(Path(logpath).read_text(errors='replace'))
+                return
+            except Exception as e:
+                fallback = f"[Could not read log file: {e}]\n\n{fallback}"
+        self.log_view.setPlainText(fallback)
 
 
 def main():
